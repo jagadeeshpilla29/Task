@@ -58,12 +58,11 @@ class ApiClient {
     bool auth = true,
   }) async {
     final uri = _uri(path, query);
-    _logRequest('GET', uri);
-    final response = await _client.get(
+    final response = await _send(
+      'GET',
       uri,
-      headers: await _headers(auth: auth),
+      () async => _client.get(uri, headers: await _headers(auth: auth)),
     );
-    _logResponse('GET', uri, response);
     return _decode(response);
   }
 
@@ -73,13 +72,16 @@ class ApiClient {
     bool auth = true,
   }) async {
     final uri = _uri(path);
-    _logRequest('POST', uri, body: body);
-    final response = await _client.post(
+    final response = await _send(
+      'POST',
       uri,
-      headers: await _headers(auth: auth),
-      body: jsonEncode(body ?? <String, dynamic>{}),
+      () async => _client.post(
+        uri,
+        headers: await _headers(auth: auth),
+        body: jsonEncode(body ?? <String, dynamic>{}),
+      ),
+      body: body,
     );
-    _logResponse('POST', uri, response);
     return _decode(response);
   }
 
@@ -88,21 +90,23 @@ class ApiClient {
     required Map<String, dynamic> body,
   }) async {
     final uri = _uri(path);
-    _logRequest('PUT', uri, body: body);
-    final response = await _client.put(
+    final response = await _send(
+      'PUT',
       uri,
-      headers: await _headers(),
-      body: jsonEncode(body),
+      () async =>
+          _client.put(uri, headers: await _headers(), body: jsonEncode(body)),
+      body: body,
     );
-    _logResponse('PUT', uri, response);
     return _decode(response);
   }
 
   Future<void> delete(String path) async {
     final uri = _uri(path);
-    _logRequest('DELETE', uri);
-    final response = await _client.delete(uri, headers: await _headers());
-    _logResponse('DELETE', uri, response);
+    final response = await _send(
+      'DELETE',
+      uri,
+      () async => _client.delete(uri, headers: await _headers()),
+    );
     if (response.statusCode != 204) {
       _decode(response);
     }
@@ -110,13 +114,13 @@ class ApiClient {
 
   Future<Map<String, dynamic>> uploadImage(String path, File file) async {
     final uri = _uri(path);
-    _logRequest('POST multipart', uri, body: {'file': file.path});
-    final request = http.MultipartRequest('POST', uri);
-    request.headers.addAll(await _headers(json: false));
-    request.files.add(await http.MultipartFile.fromPath('image', file.path));
-    final streamed = await request.send();
-    final response = await http.Response.fromStream(streamed);
-    _logResponse('POST multipart', uri, response);
+    final response = await _send('POST multipart', uri, () async {
+      final request = http.MultipartRequest('POST', uri);
+      request.headers.addAll(await _headers(json: false));
+      request.files.add(await http.MultipartFile.fromPath('image', file.path));
+      final streamed = await _client.send(request);
+      return http.Response.fromStream(streamed);
+    }, body: {'file': file.path});
     return _decode(response);
   }
 
@@ -152,10 +156,43 @@ class ApiClient {
     return headers;
   }
 
+  Future<http.Response> _send(
+    String method,
+    Uri uri,
+    Future<http.Response> Function() send, {
+    Map<String, dynamic>? body,
+  }) async {
+    _logRequest(method, uri, body: body);
+    try {
+      final response = await send();
+      _logResponse(method, uri, response);
+      return response;
+    } on SocketException {
+      throw ApiException(_networkFailureMessage(uri));
+    } on http.ClientException {
+      throw ApiException(_networkFailureMessage(uri));
+    } on FileSystemException {
+      throw ApiException('Could not read the selected image file.');
+    }
+  }
+
   Map<String, dynamic> _decode(http.Response response) {
-    final body = response.body.isEmpty
-        ? <String, dynamic>{}
-        : jsonDecode(response.body) as Map<String, dynamic>;
+    final Map<String, dynamic> body;
+    try {
+      body = response.body.isEmpty
+          ? <String, dynamic>{}
+          : jsonDecode(response.body) as Map<String, dynamic>;
+    } on FormatException {
+      throw ApiException(
+        'The server returned an invalid response.',
+        statusCode: response.statusCode,
+      );
+    } on TypeError {
+      throw ApiException(
+        'The server returned an unexpected response.',
+        statusCode: response.statusCode,
+      );
+    }
     if (response.statusCode >= 200 && response.statusCode < 300) {
       return body;
     }
@@ -165,6 +202,10 @@ class ApiClient {
           'Request failed',
       statusCode: response.statusCode,
     );
+  }
+
+  String _networkFailureMessage(Uri uri) {
+    return 'Could not connect to ${uri.authority}. Check that the API server is running and API_BASE_URL is correct.';
   }
 
   void _logRequest(String method, Uri uri, {Map<String, dynamic>? body}) {
